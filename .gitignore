@@ -24,6 +24,15 @@
 .DS_Store
 *.pem
 
+# claude
+CLAUDE.md
+
+# terraform
+aws/.terraform/
+aws/*.tfstate
+aws/*.tfstate.backup
+aws/.terraform.lock.hcl
+
 # debug
 npm-debug.log*
 yarn-debug.log*
