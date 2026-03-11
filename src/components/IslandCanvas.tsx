@@ -189,11 +189,11 @@ function Balloon({ balloonRef }: { balloonRef: React.RefObject<THREE.Group | nul
     <group ref={balloonRef}>
       <mesh position={[0, 3.2, 0]} scale={[1.06, 1.18, 1.06]}>
         <sphereGeometry args={[2.7, 36, 36]} />
-        <meshStandardMaterial color="#ffffff" emissive="#fffdf7" emissiveIntensity={0.34} roughness={0.72} metalness={0.01} />
+        <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.42} roughness={0.6} metalness={0.0} />
       </mesh>
       <mesh position={[0, 3.2, 0]} scale={[1.01, 1.12, 1.01]}>
         <sphereGeometry args={[2.72, 36, 36]} />
-        <meshStandardMaterial color="#fffaf2" transparent opacity={0.14} wireframe />
+        <meshStandardMaterial color="#ffffff" transparent opacity={0.16} wireframe />
       </mesh>
       <Html position={[0, 3.15, 2.86]} center transform sprite distanceFactor={10.5}>
         <svg
@@ -272,6 +272,10 @@ function Balloon({ balloonRef }: { balloonRef: React.RefObject<THREE.Group | nul
         <mesh position={[0, -0.12, 0]} rotation={[0, Math.PI / 2, 0]}>
           <boxGeometry args={[1.75, 0.18, 0.08]} />
           <meshStandardMaterial color="#4b5563" />
+        </mesh>
+        <mesh position={[0, -0.48, 0]} rotation={[Math.PI / 2, 0, 0]}>
+          <cylinderGeometry args={[0.9, 0.9, 0.08, 24]} />
+          <meshStandardMaterial color="#3b3f46" roughness={0.78} metalness={0.12} />
         </mesh>
       </group>
       <group position={[0, 0.12, 0.18]}>
@@ -494,6 +498,7 @@ export default function IslandCanvas({
     </Canvas>
   );
 }
+
 
 
 
