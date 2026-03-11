@@ -1,10 +1,10 @@
-﻿"use client";
+"use client";
 
 import { memo } from "react";
 import InstancedVoxels from "./InstancedVoxels";
+// import CategoryLabels from "./CategoryLabels";
 import IslandBase from "./IslandBase";
-import IslandCategoryEffects from "./IslandCategoryEffects";
-import IslandDamageEffects from "./IslandDamageEffects";
+import ErrorParticles from "./ErrorParticles";
 import type { IslandLayout } from "@/lib/cloud-island";
 
 interface IslandSceneProps {
@@ -18,11 +18,18 @@ export default memo(function IslandScene({
 }: IslandSceneProps) {
   return (
     <group>
+      {/* Base platform */}
       <IslandBase radius={layout.radius} />
-      <InstancedVoxels voxels={layout.voxels} onVoxelClick={onCategoryClick} />
-      <IslandDamageEffects sectors={layout.sectors} radius={layout.radius} />
-      <IslandCategoryEffects layout={layout} />
 
+      {/* Voxel cloud mass */}
+      <InstancedVoxels voxels={layout.voxels} onVoxelClick={onCategoryClick} />
+
+      {/* Category labels disabled */}
+
+      {/* Error particles on sectors with errors */}
+      <ErrorParticles sectors={layout.sectors} />
+
+      {/* Lighting */}
       <ambientLight intensity={0.4} color="#b8c0ff" />
       <directionalLight
         position={[15, 25, 10]}
@@ -30,8 +37,14 @@ export default memo(function IslandScene({
         color="#fff5e6"
         castShadow={false}
       />
-      <directionalLight position={[-10, 15, -8]} intensity={0.3} color="#a0b4ff" />
-      <hemisphereLight args={["#6366f1", "#1a1a2e", 0.4]} />
+      <directionalLight
+        position={[-10, 15, -8]}
+        intensity={0.3}
+        color="#a0b4ff"
+      />
+      <hemisphereLight
+        args={["#6366f1", "#1a1a2e", 0.4]}
+      />
     </group>
   );
 });
