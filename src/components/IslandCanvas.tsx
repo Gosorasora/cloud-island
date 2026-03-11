@@ -57,6 +57,7 @@ function CameraAnimator({
   const { camera } = useThree();
   const targetVec = useRef(new THREE.Vector3(0, 3, 0));
   const cameraTarget = useRef(new THREE.Vector3());
+  const previousTarget = useRef<[number, number, number] | null>(null);
   const animating = useRef(false);
 
   useFrame(() => {
@@ -78,11 +79,21 @@ function CameraAnimator({
   });
 
   useEffect(() => {
-    if (enabled && target) {
-      targetVec.current.set(target[0], target[1] + 3, target[2]);
-      cameraTarget.current.set(target[0] + 20, target[1] + 15, target[2] + 20);
-      animating.current = true;
-    }
+    if (!enabled || !target) return;
+
+    const targetChanged =
+      !previousTarget.current ||
+      previousTarget.current[0] !== target[0] ||
+      previousTarget.current[1] !== target[1] ||
+      previousTarget.current[2] !== target[2];
+
+    previousTarget.current = [target[0], target[1], target[2]];
+
+    if (!targetChanged) return;
+
+    targetVec.current.set(target[0], target[1] + 3, target[2]);
+    cameraTarget.current.set(target[0] + 20, target[1] + 15, target[2] + 20);
+    animating.current = true;
   }, [enabled, target]);
 
   return null;
@@ -498,6 +509,9 @@ export default function IslandCanvas({
     </Canvas>
   );
 }
+
+
+
 
 
 

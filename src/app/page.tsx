@@ -160,7 +160,7 @@ export default function Home() {
   const handleSimulatorChange = useCallback(
     (data: IslandData) => {
       upsertIsland("simulator", "Simulator", data);
-      setSelectedIslandId("simulator");
+      setSelectedIslandId((prev) => prev ?? "simulator");
     },
     [upsertIsland]
   );
@@ -346,3 +346,5 @@ export default function Home() {
     </div>
   );
 }
+
+
