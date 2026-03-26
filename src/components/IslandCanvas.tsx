@@ -51,6 +51,7 @@ function SkyDome() {
   return <mesh geometry={geo} material={material} renderOrder={-1} />;
 }
 
+
 // ─── Camera Animator ───────────────────────────────────────────
 
 function CameraAnimator({
@@ -329,7 +330,33 @@ function Balloon({ balloonRef }: { balloonRef: React.RefObject<THREE.Group | nul
   );
 }
 
-// ─── Main Canvas ───────────────────────────────────────────────
+
+    position.current.add(velocity.current);
+    position.current.x = THREE.MathUtils.clamp(position.current.x, -bounds, bounds);
+    position.current.y = THREE.MathUtils.clamp(position.current.y, 8, 48);
+    position.current.z = THREE.MathUtils.clamp(position.current.z, -bounds, bounds);
+
+    const bob = Math.sin(state.clock.elapsedTime * 1.7) * 0.3;
+    if (balloonRef.current) {
+      balloonRef.current.position.set(position.current.x, position.current.y + bob, position.current.z);
+      balloonRef.current.rotation.z = THREE.MathUtils.lerp(balloonRef.current.rotation.z, -velocity.current.x * 0.06, 0.08);
+      balloonRef.current.rotation.x = THREE.MathUtils.lerp(balloonRef.current.rotation.x, velocity.current.z * 0.04, 0.08);
+    }
+
+    const lookAhead = position.current.clone().add(
+      new THREE.Vector3(velocity.current.x * 6.8, 2.4, velocity.current.z * 6.8)
+    );
+    const desiredCamera = position.current.clone().add(
+      new THREE.Vector3(0, 8.2 + Math.sin(state.clock.elapsedTime * 0.6) * 0.4, 30.5)
+    );
+
+    camera.position.lerp(desiredCamera, 0.08);
+    camera.lookAt(lookAhead);
+  });
+
+  return enabled ? <Balloon balloonRef={balloonRef} /> : null;
+}
+
 
 interface IslandCanvasProps {
   islands: ArchipelagoIsland[];
@@ -346,10 +373,9 @@ export default function IslandCanvas({
 }: IslandCanvasProps) {
   const maxRadius = Math.max(20, ...islands.map((i) => i.layout.radius));
   const cameraDistance = Math.max(40, maxRadius * 2.5 + islands.length * 10);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const controlsRef = useRef<any>(null);
 
-  const selectedIsland = islands.find((i) => i.id === selectedIslandId) ?? null;
+  const controlsRef = useRef<unknown>(null);
+
 
   return (
     <Canvas
@@ -383,16 +409,15 @@ export default function IslandCanvas({
         ))}
       </Suspense>
 
-      <CameraAnimator
-        target={selectedIsland?.position ?? null}
-        controlsRef={controlsRef}
-      />
+
+      <BalloonPilot enabled={balloonMode} controlsRef={controlsRef} islands={islands} />
 
       <OrbitControls
-        ref={controlsRef}
-        enablePan={true}
-        enableZoom={true}
-        enableRotate={true}
+        ref={controlsRef as React.RefObject<unknown>}
+        enablePan={!balloonMode}
+        enableZoom={false}
+        enableRotate={!balloonMode}
+
         minDistance={10}
         maxDistance={200}
         maxPolarAngle={Math.PI * 0.75}
