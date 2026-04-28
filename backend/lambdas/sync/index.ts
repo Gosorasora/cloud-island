@@ -1,4 +1,5 @@
 import { syncIslandFromRole } from "../../../src/shared/cloud/cloudtrail-sync";
+import { saveIslandSnapshot } from "../../../src/shared/cloud/snapshot-store";
 
 interface ApiGatewayEvent {
   body?: string | null;
@@ -42,8 +43,16 @@ export async function handler(
       region: process.env.AWS_REGION,
       externalId: process.env.CLOUD_ISLAND_EXTERNAL_ID,
     });
+    const accountId = roleArn.split(":")[4] ?? islandData.accountId;
+    const label = `AWS ${accountId}`;
+    const snapshotAt = await saveIslandSnapshot(islandData, { roleArn, label });
 
-    return response(200, islandData);
+    return response(200, {
+      ...islandData,
+      label,
+      roleArn,
+      snapshotAt,
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown error during sync";

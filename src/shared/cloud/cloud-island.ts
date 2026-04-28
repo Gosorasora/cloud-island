@@ -24,6 +24,14 @@ export interface IslandData {
   totalErrors: number;
 }
 
+export interface SavedIslandSummary {
+  accountId: string;
+  label: string;
+  roleArn: string;
+  snapshotAt: string;
+  data: IslandData;
+}
+
 /** Single voxel in the 3D cloud island */
 export interface CloudVoxel {
   position: [number, number, number];

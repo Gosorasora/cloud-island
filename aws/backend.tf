@@ -46,6 +46,12 @@ resource "aws_lambda_function" "island" {
   filename         = data.archive_file.lambda_bundle.output_path
   source_code_hash = data.archive_file.lambda_bundle.output_base64sha256
   timeout          = 15
+
+  environment {
+    variables = {
+      SNAPSHOT_TABLE_NAME = aws_dynamodb_table.island_snapshots.name
+    }
+  }
 }
 
 resource "aws_apigatewayv2_api" "http" {
@@ -82,6 +88,12 @@ resource "aws_apigatewayv2_route" "sync" {
 resource "aws_apigatewayv2_route" "island" {
   api_id    = aws_apigatewayv2_api.http.id
   route_key = "GET /island"
+  target    = "integrations/${aws_apigatewayv2_integration.island.id}"
+}
+
+resource "aws_apigatewayv2_route" "islands" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "GET /islands"
   target    = "integrations/${aws_apigatewayv2_integration.island.id}"
 }
 

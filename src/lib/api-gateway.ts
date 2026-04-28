@@ -1,4 +1,4 @@
-import type { IslandData } from "@/shared/cloud/cloud-island";
+import type { IslandData, SavedIslandSummary } from "@/shared/cloud/cloud-island";
 
 type RuntimeConfig = {
   apiBaseUrl?: string;
@@ -55,4 +55,22 @@ export async function syncIsland(roleArn: string): Promise<IslandData> {
   }
 
   return (await response.json()) as IslandData;
+}
+
+export async function fetchSavedIslands(): Promise<SavedIslandSummary[]> {
+  const apiBaseUrl = await getApiBaseUrl();
+  const response = await fetch(`${apiBaseUrl}/islands`, {
+    method: "GET",
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as
+      | { error?: string }
+      | null;
+    throw new Error(error?.error || "Failed to load saved islands");
+  }
+
+  const payload = (await response.json()) as { islands?: SavedIslandSummary[] };
+  return payload.islands ?? [];
 }
