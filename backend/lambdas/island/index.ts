@@ -1,7 +1,12 @@
 import { getIslandDataByAccountId } from "../../../src/shared/cloud/island-service";
+import {
+  getLatestIslandSnapshot,
+  listSavedIslands,
+} from "../../../src/shared/cloud/snapshot-store";
 
 interface ApiGatewayEvent {
   queryStringParameters?: Record<string, string | undefined> | null;
+  rawPath?: string;
 }
 
 interface ApiGatewayResponse {
@@ -26,6 +31,11 @@ function response(statusCode: number, body: unknown): ApiGatewayResponse {
 export async function handler(
   event: ApiGatewayEvent
 ): Promise<ApiGatewayResponse> {
+  if (event.rawPath?.endsWith("/islands")) {
+    const islands = await listSavedIslands();
+    return response(200, { islands });
+  }
+
   const accountId = event.queryStringParameters?.accountId;
 
   if (!accountId) {
@@ -36,5 +46,6 @@ export async function handler(
     return response(400, { error: "accountId must be a 12-digit number" });
   }
 
-  return response(200, getIslandDataByAccountId(accountId));
+  const latestSnapshot = await getLatestIslandSnapshot(accountId);
+  return response(200, latestSnapshot ?? getIslandDataByAccountId(accountId));
 }

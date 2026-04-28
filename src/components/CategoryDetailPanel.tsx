@@ -22,7 +22,7 @@ export default function CategoryDetailPanel({
       : "0.0";
 
   return (
-    <div className="absolute right-4 top-4 z-50 w-80 rounded-xl border border-white/10 bg-[#12121a]/95 p-5 text-white shadow-2xl backdrop-blur-md">
+    <div className="absolute right-4 top-[34rem] z-50 w-80 rounded-xl border border-white/10 bg-[#12121a]/95 p-5 text-white shadow-2xl backdrop-blur-md">
       {/* Header */}
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
