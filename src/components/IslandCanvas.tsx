@@ -1,13 +1,96 @@
 "use client";
 
-import { Suspense, useMemo, useRef, useCallback, useEffect } from "react";
+import { Suspense, useMemo, useRef, useCallback, useEffect, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Stars, Html, useTexture } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import * as THREE from "three";
 import OrbitalScene from "./OrbitalScene";
-import type { ArchipelagoIsland, OrbitalLayout, CategoryActivity } from "@/lib/cloud-island";
+import type {
+  ArchipelagoIsland,
+  MultiplayerPlayerState,
+  OrbitalLayout,
+  CategoryActivity,
+} from "@/lib/cloud-island";
 import { getCategoryById } from "@/lib/aws-categories";
+
+const BLACK_HOLE_CENTER = new THREE.Vector3(-34, 8, -560);
+const BLACK_HOLE_EVENT_HORIZON = 30;
+const WHITE_HOLE_CENTER = new THREE.Vector3(-118, 12, 468);
+const WHITE_HOLE_FORWARD = BLACK_HOLE_CENTER.clone()
+  .sub(WHITE_HOLE_CENTER)
+  .normalize();
+const WHITE_HOLE_QUATERNION = new THREE.Quaternion().setFromUnitVectors(
+  new THREE.Vector3(0, 0, 1),
+  WHITE_HOLE_FORWARD
+);
+const WHITE_HOLE_PORTAL_OFFSET = 18;
+const WHITE_HOLE_EXIT_OFFSET = 8;
+const WHITE_HOLE_PORTAL_POSITION = WHITE_HOLE_CENTER
+  .clone()
+  .add(WHITE_HOLE_FORWARD.clone().multiplyScalar(WHITE_HOLE_PORTAL_OFFSET));
+const WHITE_HOLE_EXIT_POSITION = WHITE_HOLE_PORTAL_POSITION
+  .clone()
+  .add(WHITE_HOLE_FORWARD.clone().multiplyScalar(WHITE_HOLE_EXIT_OFFSET))
+  .add(new THREE.Vector3(0, 0.2, 0));
+const WHITE_HOLE_EXIT_DIRECTION = WHITE_HOLE_FORWARD.clone();
+
+interface BalloonExploreState {
+  active: boolean;
+  position: THREE.Vector3;
+  forward: THREE.Vector3;
+}
+
+interface BalloonStateSnapshot {
+  active: boolean;
+  position: [number, number, number];
+  forward: [number, number, number];
+}
+
+interface BattleProjectile {
+  id: string;
+  team: "player" | "enemy";
+  damage: number;
+  targetKind: "player" | "enemy";
+  start: THREE.Vector3;
+  end: THREE.Vector3;
+  spawnAt: number;
+  duration: number;
+  hitRadius: number;
+}
+
+function summarizeCombatStats(islandData: ArchipelagoIsland["data"]) {
+  const totalResources = islandData.categories.reduce(
+    (sum, category) => sum + category.resourceCount,
+    0
+  );
+  const dominantCategoryCalls = islandData.categories.reduce(
+    (max, category) => Math.max(max, category.apiCallCount),
+    0
+  );
+  const errorRatio =
+    islandData.totalApiCalls > 0 ? islandData.totalErrors / islandData.totalApiCalls : 0;
+
+  const maxHp = Math.round(
+    120 +
+      islandData.totalApiCalls / 260 +
+      totalResources * 2.8 -
+      Math.min(errorRatio * 120, 26)
+  );
+  const attackPower =
+    10 +
+    islandData.totalApiCalls / 4200 +
+    dominantCategoryCalls / 3200 +
+    totalResources / 12 +
+    errorRatio * 18;
+  const cooldown = THREE.MathUtils.clamp(0.9 - totalResources / 520, 0.28, 0.92);
+
+  return {
+    maxHp: Math.max(90, maxHp),
+    attackPower,
+    cooldown,
+  };
+}
 
 // ─── Space Background ─────────────────────────────────────────
 
@@ -108,7 +191,7 @@ function FixedBackdropBlackHole() {
   if (!texture) return null;
 
   return (
-    <group position={[-34, 8, -184]}>
+    <group position={[BLACK_HOLE_CENTER.x, BLACK_HOLE_CENTER.y, BLACK_HOLE_CENTER.z + 12.5]}>
       <mesh renderOrder={-0.5}>
         <planeGeometry args={[154, 154]} />
         <meshBasicMaterial
@@ -501,6 +584,7 @@ function BackgroundSet() {
   return (
     <group>
       <FixedBackdropBlackHole />
+      <FixedBackdropWhiteHole />
       {rockets.map((rocket) => (
         <BackgroundRocket key={`${rocket.phase}-${rocket.speed}`} {...rocket} />
       ))}
@@ -580,29 +664,242 @@ function ClickableIsland({
   selected,
   onSelect,
   onCategoryClick,
-  disabled,
+  categoryInteractionDisabled,
   activeCategoryId,
 }: {
   island: ArchipelagoIsland;
   selected: boolean;
   onSelect: () => void;
   onCategoryClick?: (categoryId: string) => void;
-  disabled: boolean;
+  categoryInteractionDisabled: boolean;
   activeCategoryId?: string | null;
 }) {
   const handleClick = useCallback(
     (event: THREE.Event) => {
-      if (disabled) return;
       (event as unknown as { stopPropagation: () => void }).stopPropagation();
       onSelect();
     },
-    [disabled, onSelect]
+    [onSelect]
   );
 
   return (
     <group position={island.position} onClick={handleClick}>
-      <OrbitalScene layout={island.layout as OrbitalLayout} onCategoryClick={disabled ? undefined : onCategoryClick} activeCategoryId={activeCategoryId} />
-      {selected && !disabled && <IslandInfo island={island} />}
+      <OrbitalScene
+        layout={island.layout as OrbitalLayout}
+        onCategoryClick={
+          categoryInteractionDisabled ? () => onSelect() : onCategoryClick
+        }
+        activeCategoryId={activeCategoryId}
+      />
+      {selected && <IslandInfo island={island} />}
+    </group>
+  );
+}
+
+function WhiteHoleBandArc({
+  radiusX,
+  radiusY,
+  depth,
+  bow,
+  color,
+  opacity,
+  invert = false,
+}: {
+  radiusX: number;
+  radiusY: number;
+  depth: number;
+  bow: number;
+  color: string;
+  opacity: number;
+  invert?: boolean;
+}) {
+  const geometry = useMemo(() => {
+    const points: THREE.Vector3[] = [];
+    const startAngle = invert ? Math.PI : 0;
+    const endAngle = invert ? Math.PI * 2 : Math.PI;
+
+    for (let step = 0; step <= 84; step += 1) {
+      const t = step / 84;
+      const theta = THREE.MathUtils.lerp(startAngle, endAngle, t);
+      const x = Math.cos(theta) * radiusX;
+      const y = Math.sin(theta) * radiusY;
+      const edgeLock = Math.pow(Math.sin(t * Math.PI), 0.72);
+      const curvedY = y + (invert ? -1 : 1) * bow * edgeLock;
+      points.push(new THREE.Vector3(x, curvedY, depth));
+    }
+
+    const curve = new THREE.CatmullRomCurve3(points);
+    return new THREE.TubeGeometry(curve, 144, 0.09, 10, false);
+  }, [bow, depth, invert, radiusX, radiusY]);
+
+  return (
+    <mesh geometry={geometry}>
+      <meshBasicMaterial
+        color={color}
+        transparent
+        opacity={opacity}
+        toneMapped={false}
+        blending={THREE.AdditiveBlending}
+      />
+    </mesh>
+  );
+}
+
+function FixedBackdropWhiteHole() {
+  const apertureTexture = useMemo(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1024;
+    canvas.height = 1024;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.translate(512, 512);
+
+    for (let ring = 0; ring < 13; ring++) {
+      const radius = 44 + ring * 34;
+      const gradient = ctx.createLinearGradient(-radius, 0, radius, 0);
+      gradient.addColorStop(0, "rgba(255,111,60,0.9)");
+      gradient.addColorStop(0.24, "rgba(255,206,109,0.88)");
+      gradient.addColorStop(0.5, "rgba(181,255,250,0.92)");
+      gradient.addColorStop(0.76, "rgba(100,182,255,0.86)");
+      gradient.addColorStop(1, "rgba(255,78,95,0.88)");
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = ring === 0 ? 7 : 3.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, Math.PI * 0.38, Math.PI * 1.62, true);
+      ctx.stroke();
+    }
+
+    for (let spoke = 0; spoke < 24; spoke++) {
+      const angle = THREE.MathUtils.degToRad(186 + spoke * 7.6);
+      const inner = 28;
+      const outer = 470;
+      const gradient = ctx.createLinearGradient(
+        Math.cos(angle) * inner,
+        Math.sin(angle) * inner,
+        Math.cos(angle) * outer,
+        Math.sin(angle) * outer
+      );
+      gradient.addColorStop(0, "rgba(255,255,255,0.82)");
+      gradient.addColorStop(0.4, "rgba(163,255,245,0.72)");
+      gradient.addColorStop(1, "rgba(255,89,89,0.66)");
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = spoke % 3 === 0 ? 2.8 : 1.3;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+      ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+      ctx.stroke();
+    }
+
+    const halo = ctx.createRadialGradient(0, 0, 12, 0, 0, 255);
+    halo.addColorStop(0, "rgba(255,255,255,1)");
+    halo.addColorStop(0.2, "rgba(236,255,255,0.96)");
+    halo.addColorStop(0.52, "rgba(138,235,255,0.62)");
+    halo.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(0, 0, 260, 0, Math.PI * 2);
+    ctx.fill();
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    return tex;
+  }, []);
+
+  if (!apertureTexture) return null;
+
+  const tunnelLayers = Array.from({ length: 18 }, (_, index) => ({
+    depth: 12 + index * 10,
+    radiusX: 10.6 + index * 4.15,
+    radiusY: 1.92 + index * 0.14,
+    bow: 9.5 + index * 3.3,
+    opacity: Math.max(0.16, 0.9 - index * 0.038),
+    color: new THREE.Color().setHSL(index / 19, 0.82, 0.76).getStyle(),
+  }));
+
+  return (
+    <group position={WHITE_HOLE_CENTER.toArray() as [number, number, number]}>
+      <group quaternion={WHITE_HOLE_QUATERNION}>
+        <mesh renderOrder={-0.45}>
+          <circleGeometry args={[40, 128]} />
+          <meshBasicMaterial
+            map={apertureTexture}
+            transparent
+            opacity={0.82}
+            depthWrite={false}
+            toneMapped={false}
+            blending={THREE.AdditiveBlending}
+          />
+        </mesh>
+        <mesh position={[0, 0, -1.8]}>
+          <ringGeometry args={[28, 41, 96]} />
+          <meshBasicMaterial
+            color="#d4fbff"
+            transparent
+            opacity={0.9}
+            toneMapped={false}
+            blending={THREE.AdditiveBlending}
+          />
+        </mesh>
+        <mesh position={[0, 0, 6.5]}>
+          <sphereGeometry args={[15, 42, 42]} />
+          <meshBasicMaterial
+            color="#fbfeff"
+            transparent
+            opacity={0.95}
+            toneMapped={false}
+            blending={THREE.AdditiveBlending}
+          />
+        </mesh>
+        {tunnelLayers.map((layer, index) => (
+          <group key={`ring-upper-${layer.depth}-${index}`}>
+            <WhiteHoleBandArc
+              radiusX={layer.radiusX}
+              radiusY={layer.radiusY}
+              depth={layer.depth}
+              bow={layer.bow}
+              color={layer.color}
+              opacity={layer.opacity}
+            />
+            <WhiteHoleBandArc
+              radiusX={layer.radiusX}
+              radiusY={layer.radiusY}
+              depth={layer.depth}
+              bow={layer.bow}
+              color={layer.color}
+              opacity={layer.opacity * 0.96}
+              invert
+            />
+          </group>
+        ))}
+        <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, 0, WHITE_HOLE_PORTAL_OFFSET * 0.58]} scale={[1.24, 0.28, 1]}>
+          <torusGeometry args={[18, 0.12, 10, 120]} />
+          <meshBasicMaterial
+            color="#eefcff"
+            transparent
+            opacity={0.54}
+            toneMapped={false}
+            blending={THREE.AdditiveBlending}
+          />
+        </mesh>
+      </group>
+      <mesh
+        position={WHITE_HOLE_PORTAL_POSITION.toArray() as [number, number, number]}
+        quaternion={WHITE_HOLE_QUATERNION}
+      >
+        <circleGeometry args={[8.5, 48]} />
+        <meshBasicMaterial
+          color="#efffff"
+          transparent
+          opacity={0.5}
+          depthWrite={false}
+          toneMapped={false}
+          blending={THREE.AdditiveBlending}
+        />
+      </mesh>
+      <pointLight color="#b3f1ff" intensity={7.5} distance={220} />
     </group>
   );
 }
@@ -655,10 +952,16 @@ function BalloonPilot({
   enabled,
   controlsRef,
   islands,
+  stateRef,
+  startIsland,
+  onStateChange,
 }: {
   enabled: boolean;
   controlsRef: React.RefObject<unknown>;
   islands: ArchipelagoIsland[];
+  stateRef: React.RefObject<BalloonExploreState>;
+  startIsland: ArchipelagoIsland | null;
+  onStateChange?: (state: BalloonStateSnapshot) => void;
 }) {
   const { camera } = useThree();
   const balloonRef = useRef<THREE.Group | null>(null);
@@ -669,6 +972,8 @@ function BalloonPilot({
   const lookAheadDistance = useRef(28);
   const desiredCamera = useRef(new THREE.Vector3());
   const desiredLook = useRef(new THREE.Vector3());
+  const wormholeCooldownUntil = useRef(0);
+  const lastBroadcastAt = useRef(0);
   const controls = useRef({
     forward: false,
     backward: false,
@@ -679,7 +984,7 @@ function BalloonPilot({
   });
 
   const bounds = useMemo(() => {
-    if (islands.length === 0) return 220;
+    if (islands.length === 0) return 1200;
 
     // Build an exploration boundary from the farthest island center + its visual radius,
     // then add generous margin so movement only stops near the true edge of the scene.
@@ -692,7 +997,7 @@ function BalloonPilot({
       maxReach = Math.max(maxReach, centerDistance + radius);
     }
 
-    return Math.max(220, maxReach + 140);
+    return Math.max(1200, maxReach + 700);
   }, [islands]);
 
   useEffect(() => {
@@ -767,13 +1072,11 @@ function BalloonPilot({
       controlsInstance.enabled = false;
     }
 
-    // Always enter Space Explore with a fixed, deterministic view setup.
-    const startPos = new THREE.Vector3(
-      0,
-      Math.min(Math.max(bounds * 0.15, 8), 16),
-      Math.min(Math.max(bounds * 0.62, 26), 52)
+    // Enter Space Explore from the white hole exit so the player emerges into the scene.
+    const startPos = WHITE_HOLE_EXIT_POSITION.clone().add(
+      WHITE_HOLE_EXIT_DIRECTION.clone().multiplyScalar(8)
     );
-    const startDir = new THREE.Vector3(0, 0, -1);
+    const startDir = WHITE_HOLE_EXIT_DIRECTION.clone();
     const startCam = startPos
       .clone()
       .add(new THREE.Vector3(0, followOffset.current.y, followOffset.current.z));
@@ -783,6 +1086,9 @@ function BalloonPilot({
     position.current.copy(startPos);
     velocity.current.set(0, 0, 0);
     lockedViewDir.current.copy(startDir);
+    stateRef.current.active = true;
+    stateRef.current.position.copy(startPos);
+    stateRef.current.forward.copy(startDir);
     desiredCamera.current.copy(startCam);
     desiredLook.current.copy(startLook);
 
@@ -793,7 +1099,7 @@ function BalloonPilot({
       balloonRef.current.position.copy(startPos);
       balloonRef.current.rotation.set(0, 0, 0);
     }
-  }, [enabled, controlsRef, camera, bounds]);
+  }, [enabled, controlsRef, camera, bounds, stateRef, startIsland]);
 
   useFrame((state, delta) => {
     const controlsInstance = controlsRef.current as { enabled: boolean; target: THREE.Vector3; update: () => void } | null;
@@ -801,11 +1107,28 @@ function BalloonPilot({
     if (!enabled) {
       if (controlsInstance) controlsInstance.enabled = true;
       if (balloonRef.current) balloonRef.current.visible = false;
+      stateRef.current.active = false;
+      if (onStateChange) {
+        onStateChange({
+          active: false,
+          position: [
+            stateRef.current.position.x,
+            stateRef.current.position.y,
+            stateRef.current.position.z,
+          ],
+          forward: [
+            stateRef.current.forward.x,
+            stateRef.current.forward.y,
+            stateRef.current.forward.z,
+          ],
+        });
+      }
       return;
     }
 
     if (controlsInstance) controlsInstance.enabled = false;
     if (balloonRef.current) balloonRef.current.visible = true;
+    stateRef.current.active = true;
 
     const direction = new THREE.Vector3();
     const forward = lockedViewDir.current.clone();
@@ -818,7 +1141,7 @@ function BalloonPilot({
       .addScaledVector(new THREE.Vector3(0, 1, 0), Number(controls.current.up) - Number(controls.current.down));
 
     if (direction.lengthSq() > 0) {
-      direction.normalize().multiplyScalar(26);
+      direction.normalize().multiplyScalar(58);
       velocity.current.lerp(direction, 1 - Math.exp(-4.8 * delta));
     } else {
       velocity.current.multiplyScalar(Math.exp(-3.2 * delta));
@@ -829,8 +1152,20 @@ function BalloonPilot({
     position.current.y = THREE.MathUtils.clamp(position.current.y, -bounds * 0.9, bounds * 0.9);
     position.current.z = THREE.MathUtils.clamp(position.current.z, -bounds, bounds);
 
+    if (
+      state.clock.elapsedTime >= wormholeCooldownUntil.current &&
+      position.current.distanceTo(BLACK_HOLE_CENTER) <= BLACK_HOLE_EVENT_HORIZON
+    ) {
+      position.current.copy(WHITE_HOLE_EXIT_POSITION);
+      velocity.current.copy(WHITE_HOLE_EXIT_DIRECTION).multiplyScalar(12);
+      lockedViewDir.current.copy(WHITE_HOLE_EXIT_DIRECTION);
+      wormholeCooldownUntil.current = state.clock.elapsedTime + 2.4;
+    }
+
     const yaw = Math.atan2(lockedViewDir.current.x, lockedViewDir.current.z);
     const pitch = -lockedViewDir.current.y * 0.1;
+    const lateralVelocity = velocity.current.dot(right);
+    const bankTarget = Math.abs(lateralVelocity) < 0.35 ? 0 : lateralVelocity * 0.015;
 
     if (balloonRef.current) {
       balloonRef.current.position.copy(position.current);
@@ -838,10 +1173,26 @@ function BalloonPilot({
       balloonRef.current.rotation.x = THREE.MathUtils.damp(balloonRef.current.rotation.x, pitch, 8, delta);
       balloonRef.current.rotation.z = THREE.MathUtils.damp(
         balloonRef.current.rotation.z,
-        velocity.current.x * 0.02,
+        bankTarget,
         8,
         delta
       );
+    }
+
+    stateRef.current.position.copy(position.current);
+    stateRef.current.forward.copy(lockedViewDir.current);
+
+    if (onStateChange && state.clock.elapsedTime - lastBroadcastAt.current >= 0.25) {
+      lastBroadcastAt.current = state.clock.elapsedTime;
+      onStateChange({
+        active: true,
+        position: [position.current.x, position.current.y, position.current.z],
+        forward: [
+          lockedViewDir.current.x,
+          lockedViewDir.current.y,
+          lockedViewDir.current.z,
+        ],
+      });
     }
 
     desiredCamera.current
@@ -860,6 +1211,378 @@ function BalloonPilot({
   return enabled ? <Balloon balloonRef={balloonRef} /> : null;
 }
 
+function BattleProjectileBolt({
+  projectile,
+}: {
+  projectile: BattleProjectile;
+}) {
+  const ref = useRef<THREE.Mesh | null>(null);
+
+  useFrame(({ clock }) => {
+    if (!ref.current) return;
+    const elapsed = clock.elapsedTime - projectile.spawnAt;
+    const t = THREE.MathUtils.clamp(elapsed / projectile.duration, 0, 1);
+    ref.current.position.lerpVectors(projectile.start, projectile.end, t);
+    const scale = 0.55 + Math.sin(t * Math.PI) * 1.4;
+    ref.current.scale.setScalar(scale);
+  });
+
+  return (
+    <mesh ref={ref} position={projectile.start.toArray() as [number, number, number]}>
+      <sphereGeometry args={[0.85, 12, 12]} />
+      <meshBasicMaterial
+        color={projectile.team === "player" ? "#f9d66d" : "#ff6b9f"}
+        toneMapped={false}
+      />
+    </mesh>
+  );
+}
+
+function RemoteBalloon({ player }: { player: MultiplayerPlayerState }) {
+  const balloonRef = useRef<THREE.Group | null>(null);
+  const forward = useMemo(
+    () => new THREE.Vector3(...player.forward).normalize(),
+    [player.forward]
+  );
+  const yaw = Math.atan2(forward.x, forward.z);
+  const pitch = -forward.y * 0.1;
+
+  useEffect(() => {
+    if (!balloonRef.current) return;
+    balloonRef.current.position.set(...player.position);
+    balloonRef.current.rotation.set(pitch, yaw, 0);
+  }, [pitch, player.position, yaw]);
+
+  return (
+    <>
+      <Balloon balloonRef={balloonRef} />
+      <group position={[player.position[0], player.position[1] + 4.8, player.position[2]]}>
+        <Html center transform={false} occlude={false} zIndexRange={[180, 0]}>
+          <div className="pointer-events-none -translate-y-4 rounded-md border border-cyan-300/30 bg-[#07111f]/88 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100 shadow-[0_8px_24px_rgba(0,0,0,0.45)]">
+            {player.label}
+          </div>
+        </Html>
+      </group>
+    </>
+  );
+}
+
+function BattleHealthTag({
+  label,
+  hp,
+  maxHp,
+  colorClass,
+  getWorldPosition,
+  widthClass = "w-36",
+  compact = true,
+}: {
+  label: string;
+  hp: number;
+  maxHp: number;
+  colorClass: string;
+  getWorldPosition: () => THREE.Vector3;
+  widthClass?: string;
+  compact?: boolean;
+}) {
+  const groupRef = useRef<THREE.Group | null>(null);
+
+  useFrame(() => {
+    if (!groupRef.current) return;
+    groupRef.current.position.copy(getWorldPosition());
+  });
+
+  return (
+    <group ref={groupRef}>
+      <Html center transform={false} occlude={false} zIndexRange={[200, 0]}>
+        <div className="pointer-events-none -translate-y-6">
+          <div className="inline-flex min-w-[112px] flex-col items-center gap-1 rounded-md border border-black/70 bg-black/82 px-2.5 py-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.55)]">
+            {!compact && (
+              <div className="max-w-[120px] truncate text-[9px] font-semibold uppercase tracking-[0.18em] text-white/70">
+                {label}
+              </div>
+            )}
+            <div className={`h-3 ${widthClass} overflow-hidden rounded-sm border border-white/10 bg-[#1a1d2a]`}>
+              <div
+                className={`h-full rounded-[2px] ${colorClass}`}
+                style={{ width: `${(hp / maxHp) * 100}%` }}
+              />
+            </div>
+            <div className="text-[10px] font-semibold leading-none text-white/90">
+              {hp}/{maxHp}
+            </div>
+          </div>
+        </div>
+      </Html>
+    </group>
+  );
+}
+
+function SpaceBattleController({
+  playerIsland,
+  targetIsland,
+  balloonStateRef,
+  onBattleFinished,
+}: {
+  playerIsland: ArchipelagoIsland;
+  targetIsland: ArchipelagoIsland;
+  balloonStateRef: React.RefObject<BalloonExploreState>;
+  onBattleFinished: () => void;
+}) {
+  const playerStats = useMemo(() => summarizeCombatStats(playerIsland.data), [playerIsland.data]);
+  const enemyStats = useMemo(() => summarizeCombatStats(targetIsland.data), [targetIsland.data]);
+  const [projectiles, setProjectiles] = useState<BattleProjectile[]>([]);
+  const [result, setResult] = useState<"win" | "lose" | null>(null);
+  const [playerHp, setPlayerHp] = useState(playerStats.maxHp);
+  const [enemyHp, setEnemyHp] = useState(enemyStats.maxHp);
+  const playerHpRef = useRef(playerStats.maxHp);
+  const enemyHpRef = useRef(enemyStats.maxHp);
+  const playerCooldownUntil = useRef(0.35);
+  const enemyCooldownUntil = useRef(0.75);
+  const resultTimeoutAt = useRef<number | null>(null);
+  const targetImpactPoint = useMemo(
+    () => new THREE.Vector3(...targetIsland.position).add(new THREE.Vector3(0, 6, 0)),
+    [targetIsland.position]
+  );
+  const targetHealthPosition = useMemo(() => {
+    const layout = targetIsland.layout as OrbitalLayout | undefined;
+    const outerRadius = layout?.outerRadius ?? 32;
+    return new THREE.Vector3(...targetIsland.position).add(
+      new THREE.Vector3(0, Math.max(outerRadius * 0.52, 7.5), 0)
+    );
+  }, [targetIsland.layout, targetIsland.position]);
+
+  useFrame((state) => {
+    if (result) {
+      if (resultTimeoutAt.current !== null && state.clock.elapsedTime >= resultTimeoutAt.current) {
+        resultTimeoutAt.current = null;
+        onBattleFinished();
+      }
+      return;
+    }
+    if (!balloonStateRef.current.active) return;
+
+    const now = state.clock.elapsedTime;
+    const shipOrigin = balloonStateRef.current.position.clone();
+    const shipHitPoint = shipOrigin.clone().add(new THREE.Vector3(0, 0.6, 0));
+
+    if (now >= playerCooldownUntil.current) {
+      const playerDamage = Math.round(
+        playerStats.attackPower * (0.92 + Math.sin(now * 2.2) * 0.18)
+      );
+      playerCooldownUntil.current = now + playerStats.cooldown;
+      setProjectiles((prev) => [
+        ...prev,
+        {
+          id: `p-${now}`,
+          team: "player",
+          damage: playerDamage,
+          targetKind: "enemy",
+          start: shipOrigin.clone().add(new THREE.Vector3(0, 0.6, 0)),
+          end: targetImpactPoint.clone(),
+          spawnAt: now,
+          duration: 0.42,
+          hitRadius: 8.5,
+        },
+      ]);
+    }
+
+    if (!result && now >= enemyCooldownUntil.current) {
+      const enemyDamage = Math.round(
+        enemyStats.attackPower * (0.88 + Math.abs(Math.cos(now * 1.8)) * 0.24)
+      );
+      enemyCooldownUntil.current = now + enemyStats.cooldown;
+      setProjectiles((prev) => [
+        ...prev,
+        {
+          id: `e-${now}`,
+          team: "enemy",
+          damage: enemyDamage,
+          targetKind: "player",
+          start: targetImpactPoint.clone(),
+          end: shipHitPoint.clone(),
+          spawnAt: now,
+          duration: 0.62,
+          hitRadius: 4.5,
+        },
+      ]);
+    }
+
+    setProjectiles((prev) =>
+      prev.filter((projectile) => {
+        const elapsed = now - projectile.spawnAt;
+        if (elapsed < projectile.duration) return true;
+
+        if (projectile.targetKind === "enemy") {
+          enemyHpRef.current = Math.max(0, enemyHpRef.current - projectile.damage);
+          setEnemyHp(enemyHpRef.current);
+          if (enemyHpRef.current <= 0) {
+            setResult("win");
+            resultTimeoutAt.current = now + 2.2;
+          }
+          return false;
+        }
+
+        const playerHitDistance = balloonStateRef.current.position
+          .clone()
+          .add(new THREE.Vector3(0, 0.6, 0))
+          .distanceTo(projectile.end);
+
+        if (playerHitDistance <= projectile.hitRadius) {
+          playerHpRef.current = Math.max(0, playerHpRef.current - projectile.damage);
+          setPlayerHp(playerHpRef.current);
+          if (playerHpRef.current <= 0) {
+            setResult("lose");
+            resultTimeoutAt.current = now + 2.2;
+          }
+        }
+
+        return false;
+      })
+    );
+  });
+
+  return (
+    <>
+      {projectiles.map((projectile) => (
+        <BattleProjectileBolt key={projectile.id} projectile={projectile} />
+      ))}
+
+      <BattleHealthTag
+        label="UFO"
+        hp={playerHp}
+        maxHp={playerStats.maxHp}
+        colorClass="bg-gradient-to-r from-emerald-300 via-cyan-300 to-sky-200"
+        widthClass="w-40"
+        compact
+        getWorldPosition={() =>
+          balloonStateRef.current.position.clone().add(new THREE.Vector3(0, 4.8, 0))
+        }
+      />
+      <BattleHealthTag
+        label={targetIsland.label}
+        hp={enemyHp}
+        maxHp={enemyStats.maxHp}
+        colorClass="bg-gradient-to-r from-rose-400 via-orange-300 to-amber-200"
+        widthClass="w-40"
+        compact
+        getWorldPosition={() => targetHealthPosition.clone()}
+      />
+
+      <Html fullscreen>
+        <div className="pointer-events-none absolute inset-0 z-[68]">
+          <div className="absolute left-1/2 top-5 -translate-x-1/2 rounded-full border border-white/10 bg-[#0b0d16]/70 px-5 py-3 text-[11px] uppercase tracking-[0.32em] text-white/55 shadow-2xl backdrop-blur-md">
+            {playerIsland.label} attacking {targetIsland.label}
+          </div>
+
+          {result && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div
+                className={`rounded-[32px] border px-16 py-10 text-center shadow-[0_30px_90px_rgba(0,0,0,0.45)] backdrop-blur-md ${
+                  result === "win"
+                    ? "border-emerald-200/25 bg-emerald-300/14 text-emerald-50"
+                    : "border-rose-200/25 bg-rose-400/14 text-rose-50"
+                }`}
+              >
+                <div className="text-[13px] uppercase tracking-[0.55em] text-white/45">
+                  Battle Result
+                </div>
+                <div className="mt-4 text-7xl font-black tracking-[0.18em]">
+                  {result === "win" ? "WIN" : "LOSE"}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </Html>
+    </>
+  );
+}
+
+function CameraFocusController({
+  enabled,
+  controlsRef,
+  selectedIsland,
+  focusActiveRef,
+  focusRequestKey,
+}: {
+  enabled: boolean;
+  controlsRef: React.RefObject<unknown>;
+  selectedIsland: ArchipelagoIsland | null;
+  focusActiveRef: React.RefObject<boolean>;
+  focusRequestKey: number;
+}) {
+  const { camera } = useThree();
+  const targetPosition = useRef(new THREE.Vector3());
+  const targetLookAt = useRef(new THREE.Vector3());
+  const lastFocusKey = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!enabled || !selectedIsland) {
+      focusActiveRef.current = false;
+      lastFocusKey.current = null;
+      return;
+    }
+
+    const nextFocusKey = `${selectedIsland.id}:${focusRequestKey}`;
+    if (lastFocusKey.current === nextFocusKey) return;
+    lastFocusKey.current = nextFocusKey;
+
+    const controlsInstance = controlsRef.current as {
+      target: THREE.Vector3;
+      update: () => void;
+    } | null;
+
+    const layout = selectedIsland.layout as OrbitalLayout | undefined;
+    const focusRadius = layout?.outerRadius ?? 40;
+    const islandCenter = new THREE.Vector3(...selectedIsland.position);
+    const approachDirection = camera.position.clone().sub(islandCenter).normalize();
+    if (approachDirection.lengthSq() < 0.0001) {
+      approachDirection.set(0.62, 0.42, 0.82).normalize();
+    }
+
+    targetLookAt.current.copy(islandCenter);
+    targetPosition.current
+      .copy(islandCenter)
+      .addScaledVector(approachDirection, Math.max(focusRadius * 2.1, 68))
+      .add(new THREE.Vector3(0, Math.max(focusRadius * 0.3, 10), 0));
+
+    focusActiveRef.current = true;
+
+    if (controlsInstance) controlsInstance.update();
+  }, [camera.position, controlsRef, enabled, focusActiveRef, focusRequestKey, selectedIsland]);
+
+  useFrame((_, delta) => {
+    if (!enabled || !selectedIsland || !focusActiveRef.current) return;
+
+    const controlsInstance = controlsRef.current as {
+      target: THREE.Vector3;
+      update: () => void;
+    } | null;
+
+    camera.position.lerp(targetPosition.current, 1 - Math.exp(-4.8 * delta));
+    if (controlsInstance) {
+      controlsInstance.target.lerp(targetLookAt.current, 1 - Math.exp(-5.5 * delta));
+      controlsInstance.update();
+    } else {
+      camera.lookAt(targetLookAt.current);
+    }
+
+    const cameraSettled = camera.position.distanceTo(targetPosition.current) < 0.35;
+    const targetSettled =
+      !controlsInstance || controlsInstance.target.distanceTo(targetLookAt.current) < 0.35;
+
+    if (cameraSettled && targetSettled) {
+      if (controlsInstance) {
+        controlsInstance.target.copy(targetLookAt.current);
+        controlsInstance.update();
+      }
+      focusActiveRef.current = false;
+    }
+  });
+
+  return null;
+}
+
 // ─── Main Canvas ──────────────────────────────────────────────
 
 interface IslandCanvasProps {
@@ -869,6 +1592,15 @@ interface IslandCanvasProps {
   onCategoryClick?: (categoryId: string) => void;
   balloonMode?: boolean;
   activeCategoryId?: string | null;
+  focusRequestKey?: number;
+  playerIslandId?: string | null;
+  battleActive?: boolean;
+  battleSessionKey?: number;
+  battlePlayerIslandId?: string | null;
+  battleTargetIslandId?: string | null;
+  onBattleFinished?: () => void;
+  remotePlayers?: MultiplayerPlayerState[];
+  onBalloonStateChange?: (state: BalloonStateSnapshot) => void;
 }
 
 export default function IslandCanvas({
@@ -878,6 +1610,15 @@ export default function IslandCanvas({
   onCategoryClick,
   balloonMode = false,
   activeCategoryId,
+  focusRequestKey = 0,
+  playerIslandId = null,
+  battleActive = false,
+  battleSessionKey = 0,
+  battlePlayerIslandId = null,
+  battleTargetIslandId = null,
+  onBattleFinished,
+  remotePlayers = [],
+  onBalloonStateChange,
 }: IslandCanvasProps) {
   const outerRadius = useMemo(() => {
     if (islands.length === 0) return 40;
@@ -887,6 +1628,28 @@ export default function IslandCanvas({
 
   const cameraDistance = outerRadius * 2.15;
   const controlsRef = useRef<unknown>(null);
+  const focusActiveRef = useRef(false);
+  const balloonStateRef = useRef<BalloonExploreState>({
+    active: false,
+    position: new THREE.Vector3(0, 10, 50),
+    forward: new THREE.Vector3(0, 0, -1),
+  });
+  const selectedIsland = useMemo(
+    () => islands.find((island) => island.id === selectedIslandId) ?? null,
+    [islands, selectedIslandId]
+  );
+  const battlePlayerIsland = useMemo(
+    () => islands.find((island) => island.id === battlePlayerIslandId) ?? null,
+    [battlePlayerIslandId, islands]
+  );
+  const exploreStartIsland = useMemo(
+    () => islands.find((island) => island.id === playerIslandId) ?? null,
+    [islands, playerIslandId]
+  );
+  const battleTargetIsland = useMemo(
+    () => islands.find((island) => island.id === battleTargetIslandId) ?? null,
+    [battleTargetIslandId, islands]
+  );
 
   return (
     <Canvas
@@ -922,13 +1685,42 @@ export default function IslandCanvas({
             selected={island.id === selectedIslandId}
             onSelect={() => onIslandSelect(island.id)}
             onCategoryClick={onCategoryClick}
-            disabled={balloonMode}
+            categoryInteractionDisabled={balloonMode}
             activeCategoryId={activeCategoryId}
           />
         ))}
       </Suspense>
 
-      <BalloonPilot enabled={balloonMode} controlsRef={controlsRef} islands={islands} />
+        <BalloonPilot
+          enabled={balloonMode}
+          controlsRef={controlsRef}
+          islands={islands}
+          stateRef={balloonStateRef}
+          startIsland={exploreStartIsland}
+          onStateChange={onBalloonStateChange}
+        />
+
+        {remotePlayers.map((player) => (
+          <RemoteBalloon key={player.playerId} player={player} />
+        ))}
+
+      {balloonMode && battleActive && battlePlayerIsland && battleTargetIsland && (
+        <SpaceBattleController
+          key={`${battleSessionKey}-${battlePlayerIsland.id}-${battleTargetIsland.id}`}
+          playerIsland={battlePlayerIsland}
+          targetIsland={battleTargetIsland}
+          balloonStateRef={balloonStateRef}
+          onBattleFinished={onBattleFinished ?? (() => {})}
+        />
+      )}
+
+      <CameraFocusController
+        enabled={!balloonMode}
+        controlsRef={controlsRef}
+        selectedIsland={selectedIsland}
+        focusActiveRef={focusActiveRef}
+        focusRequestKey={focusRequestKey}
+      />
 
       <OrbitControls
         ref={controlsRef as React.RefObject<null>}
@@ -938,6 +1730,9 @@ export default function IslandCanvas({
         minDistance={18}
         maxDistance={240}
         target={[0, 0, 0]}
+        onStart={() => {
+          focusActiveRef.current = false;
+        }}
       />
 
       <EffectComposer>
