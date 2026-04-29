@@ -5,12 +5,17 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:frontend": "next build",
+    "build:lambdas": "tsc -p tsconfig.lambda.json",
+    "build:deploy": "npm run build:frontend && npm run build:lambdas",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
     "@aws-sdk/client-cloudtrail": "^3.1004.0",
+    "@aws-sdk/client-dynamodb": "^3.1004.0",
     "@aws-sdk/client-sts": "^3.1004.0",
+    "@aws-sdk/lib-dynamodb": "^3.1004.0",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.5.0",
     "@react-three/postprocessing": "^3.0.4",

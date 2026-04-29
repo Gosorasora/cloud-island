@@ -1,22 +1,24 @@
 ﻿"use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import dynamic from "next/dynamic";
+import { fetchSavedIslands, syncIsland } from "@/lib/api-gateway";
 import { generateOrbitalLayout } from "@/lib/orbital-layout";
 import type { IslandData, ArchipelagoIsland, OrbitalLayout } from "@/lib/cloud-island";
 import AccountInput from "@/components/AccountInput";
 import CategoryLegend from "@/components/CategoryLegend";
 import CategoryDetailPanel from "@/components/CategoryDetailPanel";
+import IslandDetailPanel from "@/components/IslandDetailPanel";
 import LoadingScreen, { type LoadingStage } from "@/components/LoadingScreen";
 import SimulatorPanel from "@/components/SimulatorPanel";
-import PresetSelector from "@/components/PresetSelector";
+import { PRESET_DATA } from "@/lib/mock-data";
 import { X } from "lucide-react";
 
 const IslandCanvas = dynamic(() => import("@/components/IslandCanvas"), {
   ssr: false,
 });
 
-type TabMode = "simulator" | "presets" | "connect";
+type TabMode = "simulator" | "connect";
 
 function SpaceBackdrop() {
   return (
@@ -133,7 +135,13 @@ function arrangeIslands(
 export default function Home() {
   const [islandEntries, setIslandEntries] = useState<
     { id: string; label: string; data: IslandData }[]
-  >([]);
+  >(() =>
+    PRESET_DATA.map((preset) => ({
+      id: preset.id,
+      label: preset.label,
+      data: preset.data,
+    }))
+  );
   const [loading, setLoading] = useState(false);
   const [loadingStage, setLoadingStage] = useState<LoadingStage>("init");
   const [loadingProgress, setLoadingProgress] = useState(0);
@@ -144,8 +152,23 @@ export default function Home() {
   const [lastRoleArn, setLastRoleArn] = useState<string | null>(null);
   const [selectedIslandId, setSelectedIslandId] = useState<string | null>(null);
   const [balloonMode, setBalloonMode] = useState(false);
+  const [cameraFocusNonce, setCameraFocusNonce] = useState(0);
+  const [spaceBattleActive, setSpaceBattleActive] = useState(false);
+  const [spaceBattleNonce, setSpaceBattleNonce] = useState(0);
 
   const islands = useMemo(() => arrangeIslands(islandEntries), [islandEntries]);
+  const selectedIsland = useMemo(
+    () => islands.find((island) => island.id === selectedIslandId) ?? null,
+    [islands, selectedIslandId]
+  );
+  const playerIsland = useMemo(
+    () =>
+      islands.find((island) => island.id.startsWith("aws-")) ??
+      islands.find((island) => island.id === "simulator") ??
+      islands[0] ??
+      null,
+    [islands]
+  );
 
   const upsertIsland = useCallback((id: string, label: string, data: IslandData) => {
     setIslandEntries((prev) => {
@@ -164,6 +187,13 @@ export default function Home() {
     setSelectedIslandId((prev) => (prev === id ? null : prev));
   }, []);
 
+  const focusIsland = useCallback((id: string | null) => {
+    setSelectedIslandId(id);
+    if (id) {
+      setCameraFocusNonce((prev) => prev + 1);
+    }
+  }, []);
+
   const fetchIsland = useCallback(
     async (roleArn: string) => {
       setLoading(true);
@@ -173,27 +203,18 @@ export default function Home() {
       setLoadingError(null);
 
       try {
-        const response = await fetch("/api/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ roleArn }),
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error || "Failed to sync AWS data");
-        }
-
         setLoadingStage("generating");
         setLoadingProgress(50);
 
-        const data: IslandData = await response.json();
+        const data: IslandData = await syncIsland(roleArn);
 
         setLoadingStage("rendering");
         setLoadingProgress(80);
 
         const accountId = roleArn.split(":")[4];
-        upsertIsland(`aws-${accountId}`, `AWS ${accountId}`, data);
+        const islandId = `aws-${accountId}`;
+        upsertIsland(islandId, `AWS ${accountId}`, data);
+        focusIsland(islandId);
 
         setTimeout(() => {
           setLoadingProgress(100);
@@ -208,7 +229,7 @@ export default function Home() {
         setLoading(false);
       }
     },
-    [upsertIsland]
+    [focusIsland, upsertIsland]
   );
 
   const handleRetry = useCallback(() => {
@@ -222,6 +243,53 @@ export default function Home() {
     setLoadingStage("done");
   }, []);
 
+  useEffect(() => {
+    let active = true;
+
+    async function loadSavedIslands() {
+      try {
+        const savedIslands = await fetchSavedIslands();
+        if (!active) return;
+
+        if (savedIslands.length > 0) {
+          setIslandEntries((prev) => {
+            const next = [...prev];
+            for (const island of savedIslands) {
+              const id = `aws-${island.accountId}`;
+              const existingIndex = next.findIndex((entry) => entry.id === id);
+              const nextEntry = {
+                id,
+                label: island.label,
+                data: island.data,
+              };
+
+              if (existingIndex >= 0) {
+                next[existingIndex] = nextEntry;
+              } else {
+                next.push(nextEntry);
+              }
+            }
+            return next;
+          });
+        }
+
+        setSelectedIslandId((prev) => {
+          if (savedIslands[0]) return `aws-${savedIslands[0].accountId}`;
+          return prev ?? PRESET_DATA[0]?.id ?? null;
+        });
+      } catch (error) {
+        console.error("Failed to load saved islands:", error);
+        setSelectedIslandId((prev) => prev ?? PRESET_DATA[0]?.id ?? null);
+      }
+    }
+
+    void loadSavedIslands();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const handleCategoryClick = useCallback((categoryId: string) => {
     if (balloonMode) return;
     setSelectedCategory((prev) => (prev === categoryId ? null : categoryId));
@@ -230,30 +298,22 @@ export default function Home() {
   const handleSimulatorChange = useCallback(
     (data: IslandData) => {
       upsertIsland("simulator", "Simulator", data);
+      focusIsland("simulator");
+      setSelectedCategory(null);
     },
-    [upsertIsland]
-  );
-
-  const handlePresetSelect = useCallback(
-    (data: IslandData, presetLabel: string) => {
-      upsertIsland(data.accountId, presetLabel, data);
-      setSelectedIslandId(data.accountId);
-    },
-    [upsertIsland]
+    [focusIsland, upsertIsland]
   );
 
   const selectedActivity = useMemo(() => {
-    if (!selectedCategory || islands.length === 0) return null;
+    if (!selectedCategory || !selectedIsland) return null;
 
-    for (const island of islands) {
-      const found = island.data.categories.find(
-        (category) => category.categoryId === selectedCategory
-      );
-      if (found && found.apiCallCount > 0) return found;
-    }
-
-    return null;
-  }, [selectedCategory, islands]);
+    return (
+      selectedIsland.data.categories.find(
+        (category) =>
+          category.categoryId === selectedCategory && category.apiCallCount > 0
+      ) ?? null
+    );
+  }, [selectedCategory, selectedIsland]);
 
   const legendSectors = useMemo(() => {
     if (islands.length === 0) return [];
@@ -262,9 +322,14 @@ export default function Home() {
 
   const tabs: { key: TabMode; label: string }[] = [
     { key: "simulator", label: "Simulator" },
-    { key: "presets", label: "Presets" },
     { key: "connect", label: "Connect AWS" },
   ];
+
+  useEffect(() => {
+    if (!balloonMode || !selectedIsland || !playerIsland || selectedIsland.id === playerIsland.id) {
+      setSpaceBattleActive(false);
+    }
+  }, [balloonMode, playerIsland, selectedIsland]);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#0a0a14]">
@@ -282,7 +347,9 @@ export default function Home() {
 
       <div className="absolute right-4 top-4 z-50 flex items-center gap-2">
         <button
-          onClick={() => setBalloonMode((prev) => !prev)}
+          onClick={() => {
+            setBalloonMode((prev) => !prev);
+          }}
           disabled={islands.length === 0}
           className={`rounded-full border px-4 py-2 text-sm font-medium shadow-lg backdrop-blur-md transition ${
             islands.length === 0
@@ -306,10 +373,17 @@ export default function Home() {
           <IslandCanvas
             islands={islands}
             selectedIslandId={selectedIslandId}
-            onIslandSelect={setSelectedIslandId}
+            onIslandSelect={focusIsland}
             onCategoryClick={handleCategoryClick}
             balloonMode={balloonMode}
             activeCategoryId={selectedCategory}
+            focusRequestKey={cameraFocusNonce}
+            playerIslandId={playerIsland?.id ?? null}
+            battleActive={spaceBattleActive}
+            battleSessionKey={spaceBattleNonce}
+            battlePlayerIslandId={playerIsland?.id ?? null}
+            battleTargetIslandId={selectedIsland?.id ?? null}
+            onBattleFinished={() => setSpaceBattleActive(false)}
           />
 
           {!balloonMode && (
@@ -320,7 +394,42 @@ export default function Home() {
             />
           )}
 
-          {!balloonMode && selectedActivity && (
+          {selectedIsland && (
+            <IslandDetailPanel
+              islandLabel={selectedIsland.label}
+              islandData={selectedIsland.data}
+              actionSlot={
+                balloonMode && playerIsland && selectedIsland.id !== playerIsland.id ? (
+                  <button
+                    onClick={() => {
+                      setSpaceBattleNonce((prev) => prev + 1);
+                      setSpaceBattleActive(true);
+                    }}
+                    className="flex w-full items-center justify-between rounded-2xl border border-rose-300/25 bg-gradient-to-r from-rose-500/18 via-orange-400/14 to-amber-300/12 px-4 py-3 text-left text-white transition hover:from-rose-500/24 hover:via-orange-400/18 hover:to-amber-300/16"
+                  >
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.28em] text-rose-100/55">
+                        Space Explore
+                      </div>
+                      <div className="mt-1 text-sm font-semibold text-rose-50">
+                        공격
+                      </div>
+                    </div>
+                    <div className="rounded-full border border-rose-200/20 bg-black/20 px-3 py-1 text-[11px] text-rose-100/75">
+                      Launch Attack
+                    </div>
+                  </button>
+                ) : null
+              }
+              onClose={() => {
+                setSelectedIslandId(null);
+                setSelectedCategory(null);
+                setSpaceBattleActive(false);
+              }}
+            />
+          )}
+
+          {!balloonMode && selectedIsland && selectedActivity && (
             <CategoryDetailPanel
               activity={selectedActivity}
               onClose={() => setSelectedCategory(null)}
@@ -337,7 +446,7 @@ export default function Home() {
           {islandEntries.map((entry) => (
             <div
               key={entry.id}
-              onClick={() => setSelectedIslandId(entry.id)}
+              onClick={() => focusIsland(entry.id)}
               className={`flex cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-1 text-xs transition-colors ${
                 selectedIslandId === entry.id
                   ? "bg-indigo-500/20 text-indigo-300"
@@ -381,7 +490,6 @@ export default function Home() {
           </div>
 
           {activeTab === "simulator" && <SimulatorPanel onDataChange={handleSimulatorChange} />}
-          {activeTab === "presets" && <PresetSelector onSelect={handlePresetSelect} activePresetId={null} />}
           {activeTab === "connect" && (
             <div className="flex w-80 flex-col gap-3 rounded-xl border border-white/10 bg-[#12121a]/90 p-4 backdrop-blur-md">
               <h3 className="text-xs font-semibold uppercase tracking-widest text-white/50">
